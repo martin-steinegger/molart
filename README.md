@@ -28,7 +28,7 @@ Further styles: glass, frosted, cartoon, surface and ASCII.
   for every base, alone or next to protein. Art mode does not reshape them.
 - **Local.** Files you open stay in your browser. Fetching by PDB ID is an explicit button and
   goes to files.rcsb.org.
-- **Export.** White-background PNG up to 4K.
+- **Export.** PNG up to 4K, with a white background or a transparent background (**More → Picture**).
 
 ## Run
 

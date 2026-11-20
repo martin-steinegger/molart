@@ -172,6 +172,7 @@ uniform float uOpacity;
 uniform float uSoft;
 uniform float uFreq;
 uniform float uFast;
+uniform bool uTransparent;
 uniform float uDissolve;
 uniform float uDissolveW;
 uniform sampler2D tPeelColor;
@@ -222,6 +223,7 @@ void main(){
   vec4 n0 = texture(tNormal, vUv);
   bool bg0 = s0.w <= 0.0;
   vec3 paper = vec3(1.0);
+  float transmission = bg0 ? 1.0 : 0.0;
 
   // --- wash colour with optional misregistration ---
   vec2 mo = uMisreg * uPx * uTexel;
@@ -285,12 +287,17 @@ void main(){
     // with a soft body the thin edge of a lobe stays luminous in front of another lobe (it scatters light,
     // it does not turn into a clear film); only towards the paper does it thin out fully
     float keep = 0.82 * step(1e-4, uWaxSoft) * has2;
-    col = mix(behind, own, mix(a1, 1.0, keep));
+    float body = mix(a1, 1.0, keep);
+    col = mix(behind, own, body);
     // edges of the layers behind read as soft lines inside the body
     vec2 we = 1.4 * uPx * uTexel;
     float wd = max(max(abs(texture(tPeelSurf, vUv + vec2(we.x, 0.0)).w - wp.w), abs(texture(tPeelSurf, vUv - vec2(we.x, 0.0)).w - wp.w)),
                    max(abs(texture(tPeelSurf, vUv + vec2(0.0, we.y)).w - wp.w), abs(texture(tPeelSurf, vUv - vec2(0.0, we.y)).w - wp.w)));
-    col = mix(col, own * 0.9, has1 * sstep(0.5, 1.6, wd) * (1.0 - 0.5 * a1) * uWaxLayers);
+    float lines = has1 * sstep(0.5, 1.6, wd) * (1.0 - 0.5 * a1) * uWaxLayers;
+    col = mix(col, own * 0.9, lines);
+    if (uTransparent) {
+      transmission = uWax.y * mix(1.0, 0.25 * (1.0 - a2), has2) * (1.0 - body) * (1.0 - lines);
+    }
   }
 
   // glass: absorb by measured thickness, refract what lies behind, add highlights and rim
@@ -313,15 +320,19 @@ void main(){
     vec3 bn = texture(tPeel2Normal, ruv).xyz * useB2 + texture(tNormal, ruv).xyz * useB0 + texture(tPeel2Normal, vUv).xyz * useD2;
     float found = clamp(useB2 + useB0 + useD2, 0.0, 1.0);
     bn = normalize(bn + vec3(0.0, 0.0, 1e-4));
-    vec3 back = mix(paper, glassBody(max(bt, vec3(1e-3)), bn, uGlassThick / max(abs(bn.z), 0.4)) + vec3(glassSpec(bn) * 0.3), found);
-    col = back * glassBody(c0.rgb, n, thick);
+    vec3 backTint = glassBody(max(bt, vec3(1e-3)), bn, uGlassThick / max(abs(bn.z), 0.4));
+    vec3 frontTint = glassBody(c0.rgb, n, thick);
+    float backSpec = glassSpec(bn) * 0.3;
+    vec3 back = mix(paper, backTint + vec3(backSpec), found);
+    col = back * frontTint;
     // the glass has body: part of the light is scattered in the tinted mass instead of passing through
     float wrap = dot(rig(n), normalize(vec3(-0.45, 0.65, 0.62))) * 0.5 + 0.5;
     vec3 solid = pow(max(c0.rgb, vec3(1e-3)), vec3(1.25)) * (0.66 + 0.4 * wrap);
     col = mix(col, solid, 0.13);
     // the far face of this piece: its own faint highlights, and its edges read as lines inside the glass
     vec3 n1 = normalize(texture(tPeelNormal, vUv).xyz + vec3(0.0, 0.0, 1e-4));
-    col += uRigCol * (glassSpec(n1) * 0.25 * has1);
+    float farSpec = glassSpec(n1) * 0.25 * has1;
+    col += uRigCol * farSpec;
     vec2 e = 1.3 * uPx * uTexel;
     vec2 iuv = vUv - n.xy * uGlassRefr * 0.5 * uPx * uTexel;   // seen through the front face, so shifted
     float pc = texture(tPeelSurf, iuv).w;
@@ -354,8 +365,17 @@ void main(){
     // the dark side of the studio reflects too: it deepens the glass between the lights
     col *= 1.0 - 0.22 * (1.0 - sky) * (1.0 - cut);
     float refl = key * mull * 0.80 + strip * 0.55 + fill * 0.22 + sky * 0.10;
-    col = mix(col, vec3(0.985, 0.975, 1.0) * uRigCol, clamp(refl * (0.42 + 0.58 * fres) + fres * 0.45, 0.0, 1.0) * (1.0 - 0.85 * cut));
-    col += uRigCol * glassSpec(ng);
+    float reflection = clamp(refl * (0.42 + 0.58 * fres) + fres * 0.45, 0.0, 1.0) * (1.0 - 0.85 * cut);
+    float frontSpec = glassSpec(ng);
+    col = mix(col, vec3(0.985, 0.975, 1.0) * uRigCol, reflection);
+    col += uRigCol * frontSpec;
+    if (uTransparent) {
+      // PNG alpha is scalar, so estimate background transmission from the tinted light's luminance.
+      vec3 through = frontTint * mix(paper, backTint, found);
+      float spec = clamp(frontSpec + farSpec + backSpec * found, 0.0, 1.0);
+      transmission = 0.87 * dot(through, vec3(0.2126, 0.7152, 0.0722));
+      transmission *= (1.0 - cut) * (1.0 - reflection) * (1.0 - spec);
+    }
   }
 
   // --- contour search ---
@@ -433,9 +453,14 @@ void main(){
     if (edge < uDissolve * (0.25 + 1.5 * nz)) col = mix(col, paper, 0.85);
   }
   vec3 inkCol = mix(lin(uInk), lin(uInk2), vnoise1(inkT * 0.37 + uSeed * 2.0));
-  col = mix(col, inkCol, clamp(ink * uOpacity, 0.0, 1.0));
+  float inkCoverage = clamp(ink * uOpacity, 0.0, 1.0);
+  col = mix(col, inkCol, inkCoverage);
   if (bg0 && ink <= 0.0 && cMis.a <= 0.5) col = paper;
-  outColor = vec4(pow(clamp(col, 0.0, 1.0), vec3(1.0 / 2.2)), 1.0);
+  vec3 rgb = pow(clamp(col, 0.0, 1.0), vec3(1.0 / 2.2));
+  // Store white-matted RGB and the transmitted fraction of that white. Both can be multiplied
+  // across layers and filtered together before we recover straight RGBA for PNG.
+  float t = pow(clamp(transmission * (1.0 - inkCoverage), 0.0, 1.0), 1.0 / 2.2);
+  outColor = vec4(rgb, uTransparent ? min(t, min(rgb.r, min(rgb.g, rgb.b))) : 1.0);
 }`;
 
 export const DOWNSAMPLE_FRAG = /* glsl */ `
@@ -447,12 +472,12 @@ out vec4 outColor;
 void main(){
   // Source is 2x (or 1x) the output size. A bilinear tap at the output pixel centre averages the
   // 2x2 source block exactly; four extra half-weight taps give a gentle tent filter.
-  vec3 c = texture(tSrc, vUv).rgb * 0.5;
-  c += texture(tSrc, vUv + vec2( 1.0,  1.0) * uSrcTexel).rgb * 0.125;
-  c += texture(tSrc, vUv + vec2(-1.0,  1.0) * uSrcTexel).rgb * 0.125;
-  c += texture(tSrc, vUv + vec2( 1.0, -1.0) * uSrcTexel).rgb * 0.125;
-  c += texture(tSrc, vUv + vec2(-1.0, -1.0) * uSrcTexel).rgb * 0.125;
-  outColor = vec4(c, 1.0);
+  vec4 c = texture(tSrc, vUv) * 0.5;
+  c += texture(tSrc, vUv + vec2( 1.0,  1.0) * uSrcTexel) * 0.125;
+  c += texture(tSrc, vUv + vec2(-1.0,  1.0) * uSrcTexel) * 0.125;
+  c += texture(tSrc, vUv + vec2( 1.0, -1.0) * uSrcTexel) * 0.125;
+  c += texture(tSrc, vUv + vec2(-1.0, -1.0) * uSrcTexel) * 0.125;
+  outColor = c;
 }`;
 
 
@@ -473,6 +498,7 @@ uniform float uGlyphRange;
 uniform vec2 uCell;          // cell size in uv
 uniform float uPxCell;       // one output pixel in cell heights
 uniform vec2 uBlend;
+uniform bool uTransparent;
 out vec4 outColor;
 float hash12(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
 void tap(vec2 q, inout vec3 acc, inout float cov){
@@ -481,11 +507,11 @@ void tap(vec2 q, inout vec3 acc, inout float cov){
   cov += on;
 }
 void main(){
-  vec3 pic = texture(tSrc, vUv).rgb * 0.5;
-  pic += texture(tSrc, vUv + vec2( 1.0,  1.0) * uSrcTexel).rgb * 0.125;
-  pic += texture(tSrc, vUv + vec2(-1.0,  1.0) * uSrcTexel).rgb * 0.125;
-  pic += texture(tSrc, vUv + vec2( 1.0, -1.0) * uSrcTexel).rgb * 0.125;
-  pic += texture(tSrc, vUv + vec2(-1.0, -1.0) * uSrcTexel).rgb * 0.125;
+  vec4 pic = texture(tSrc, vUv) * 0.5;
+  pic += texture(tSrc, vUv + vec2( 1.0,  1.0) * uSrcTexel) * 0.125;
+  pic += texture(tSrc, vUv + vec2(-1.0,  1.0) * uSrcTexel) * 0.125;
+  pic += texture(tSrc, vUv + vec2( 1.0, -1.0) * uSrcTexel) * 0.125;
+  pic += texture(tSrc, vUv + vec2(-1.0, -1.0) * uSrcTexel) * 0.125;
   vec2 g = vUv / uCell;
   vec2 cell = floor(g);
   vec2 loc = g - cell;
@@ -516,5 +542,5 @@ void main(){
   vec3 hue = hc / max(max(hc.r, max(hc.g, hc.b)), 1e-3);
   vec3 tc = hue * hue * 0.84;
   vec3 text = mix(vec3(1.0), tc, inkA);
-  outColor = vec4(mix(pic, text, isText), 1.0);
+  outColor = mix(pic, vec4(text, uTransparent ? 1.0 - inkA : 1.0), isText);
 }`;

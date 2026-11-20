@@ -20,6 +20,7 @@ interface Settings {
   /** artistic deformation per style (each style's slider is opt-in on its own) */
   deforms?: Record<string, number>;
   exportSize: number;
+  transparentExport: boolean;
   /** User-chosen colours per style id (two sRGB hex strings), for styles that offer a colour choice. */
   colors?: Record<string, [string, string]>;
   /** Per-structure chain styles: structure id → (chain id → style id). Chains not listed use the main style. */
@@ -109,6 +110,7 @@ export class App {
       seed: 7,
       deform: 0,
       exportSize: 2048,
+      transparentExport: false,
       ...(store.get<Settings>(SETTINGS_KEY) ?? {}),
     };
     // Safe start: if the page died while drawing something last time, do not walk into the same state again.
@@ -249,6 +251,12 @@ export class App {
       this.settings.exportSize = parseInt(size.value, 10);
       this.saveSettings();
     });
+    const transparent = h('input', { type: 'checkbox' });
+    transparent.checked = this.settings.transparentExport;
+    transparent.addEventListener('change', () => {
+      this.settings.transparentExport = transparent.checked;
+      this.saveSettings();
+    });
     const exportBtn = h('button', { class: 'primary' }, 'Export');
     exportBtn.addEventListener('click', () => void this.downloadPNG());
     const galleryBtn = h('button', {}, 'Same-view gallery');
@@ -301,7 +309,7 @@ export class App {
       { class: 'drawer', 'aria-label': 'More', inert: '' },
       h('header', {}, h('h1', {}, 'molart'), closeBtn),
       h('section', {}, h('h2', {}, 'Structure'), h('div', { class: 'row' }, openBtn, file, sampleSel), h('div', { class: 'row' }, pdbId, fetchBtn)),
-      h('section', {}, h('h2', {}, 'Picture'), h('div', { class: 'row' }, h('label', {}, 'Seed ', seed), size), h('div', { class: 'row' }, resetBtn, camBtn, galleryBtn)),
+      h('section', {}, h('h2', {}, 'Picture'), h('div', { class: 'row' }, h('label', {}, 'Seed ', seed), size, h('label', { class: 'check' }, transparent, 'Transparent background')), h('div', { class: 'row' }, resetBtn, camBtn, galleryBtn)),
       h('section', {}, h('h2', {}, 'Light'), h('div', { class: 'row light' }, lightOn, lightAngle, lightColor)),
       h('section', {}, h('h2', {}, 'Style'), technique),
       h('section', {}, h('h2', {}, 'About'), els.info, h('p', { class: 'technique' }, 'Drag to rotate, scroll to zoom, right-drag to pan. R resets the view; keys 1–9 and 0 switch styles.')),
@@ -669,13 +677,14 @@ export class App {
   /** Export: show the PNG in a dialog (works where downloads are blocked) with a download link. */
   async downloadPNG() {
     if (!this.structure) return;
-    const n = this.settings.exportSize;
-    const blob = await this.r.exportPNG(n, n);
-    const name = `${this.structure.id}-${this.settings.style}-seed${this.settings.seed}-${n}.png`;
-    this.showImageDialog(blob, name, `${name} · ${n} × ${n} px · opaque white background`, `Exported ${this.settings.style} rendering of ${this.structure.id}`);
+    const { exportSize: n, transparentExport: transparent } = this.settings;
+    const blob = await this.r.exportPNG(n, n, transparent);
+    const name = `${this.structure.id}-${this.settings.style}-seed${this.settings.seed}-${n}${transparent ? '-transparent' : ''}.png`;
+    const background = transparent ? 'transparent background' : 'opaque white background';
+    this.showImageDialog(blob, name, `${name} · ${n} × ${n} px · ${background}`, `Exported ${this.settings.style} rendering of ${this.structure.id}`, transparent);
   }
 
-  private showImageDialog(blob: Blob, name: string, title: string, alt: string) {
+  private showImageDialog(blob: Blob, name: string, title: string, alt: string, transparent = false) {
     const url = URL.createObjectURL(blob);
     const close = h('button', {}, 'Close');
     const dl = h('a', { href: url, download: name }, 'Download');
@@ -686,7 +695,7 @@ export class App {
       { class: 'exportbox', role: 'dialog', 'aria-label': title },
       h('header', {}, h('h2', {}, title), h('div', { class: 'row' }, dl, close)),
       h('p', {}, 'If the download button does nothing here, right-click the image (or long-press on a phone) and save it. The saved file is the full-resolution PNG.'),
-      h('div', { class: 'frame' }, h('img', { src: url, alt })),
+      h('div', { class: 'frame' }, h('img', { src: url, alt, class: transparent ? 'transparent-export' : '' })),
     );
     const done = () => {
       box.remove();

@@ -148,6 +148,7 @@ export class MolartRenderer {
         uSoft: { value: 0.6 },
         uFreq: { value: 1 },
         uFast: { value: 0 },
+        uTransparent: { value: false },
         uDissolve: { value: 0 },
         uDissolveW: { value: 0 },
         tPeelColor: { value: null },
@@ -193,6 +194,7 @@ export class MolartRenderer {
         tSrc: { value: null }, uSrcTexel: { value: new THREE.Vector2() }, tSurf: { value: null },
         tGlyph: { value: glyphTex }, uGlyphN: { value: atlas.count }, uGlyphRange: { value: GLYPH_RANGE },
         uCell: { value: new THREE.Vector2() }, uPxCell: { value: 0 }, uBlend: { value: new THREE.Vector2() },
+        uTransparent: { value: false },
       },
       depthTest: false,
       depthWrite: false,
@@ -685,7 +687,7 @@ export class MolartRenderer {
   }
 
   /** Full pipeline at (w,h) output pixels with supersampling factor ss; result into `target` (null = canvas). */
-  private renderPipeline(w: number, h: number, ss: number, target: THREE.WebGLRenderTarget | null, aspectFit?: number) {
+  private renderPipeline(w: number, h: number, ss: number, target: THREE.WebGLRenderTarget | null, aspectFit?: number, transparent = false) {
     if (!this.style || !this.layers.length) return;
     const gw = w * ss, gh = h * ss;
     const set = this.ensureTargets(gw, gh);
@@ -700,11 +702,14 @@ export class MolartRenderer {
     cam.updateProjectionMatrix();
     const r = this.renderer;
     const multi = this.layers.length > 1;
+    this.compositeMat.uniforms.uTransparent.value = transparent;
+    this.asciiMat.uniforms.uTransparent.value = transparent;
     const mul = (m: THREE.RawShaderMaterial, on: boolean) => {
-      // layers are pictures on white paper: multiplying them lays one over the other
+      // Multiply the white-matted colours and the fractions of background transmitted by the layers.
       m.blending = on ? THREE.CustomBlending : THREE.NormalBlending;
       m.blendSrc = on ? THREE.DstColorFactor : THREE.SrcAlphaFactor;
       m.blendDst = on ? THREE.ZeroFactor : THREE.OneMinusSrcAlphaFactor;
+      m.blendSrcAlpha = on ? THREE.DstAlphaFactor : null;
     };
     if (multi) {
       if (!set.accum) set.accum = new THREE.WebGLRenderTarget(gw, gh, { type: THREE.HalfFloatType, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: false });
@@ -962,37 +967,50 @@ export class MolartRenderer {
     return (performance.now() - t0) / frames;
   }
 
-  /** Render offscreen at an exact pixel size and return opaque RGBA pixels (top row first). */
-  renderPixels(width: number, height: number): Uint8ClampedArray {
+  /** Render offscreen at an exact pixel size and return straight RGBA pixels (top row first). */
+  renderPixels(width: number, height: number, transparent = false): Uint8ClampedArray {
     const max = this.renderer.capabilities.maxTextureSize;
     if (width > max || height > max) throw new Error(`Requested ${width}×${height} exceeds GPU texture limit ${max}.`);
     const ss = width * 2 <= max && height * 2 <= max && width * height <= 4.2e6 ? 2 : 1;
     const out = new THREE.WebGLRenderTarget(width, height, { type: THREE.UnsignedByteType, depthBuffer: false });
     // an export shows the central square of a wide window (where the default view frames the protein), not its empty sides
     const aspect = Math.min(1, this.canvasAspect());
-    this.renderPipeline(width, height, ss, out, aspect);
+    this.renderPipeline(width, height, ss, out, aspect, transparent);
     const buf = new Uint8Array(width * height * 4);
     this.renderer.readRenderTargetPixels(out, 0, 0, width, height, buf);
     out.dispose();
-    // flip vertically and force opaque alpha
+    // flip vertically
     const px = new Uint8ClampedArray(width * height * 4);
     for (let y = 0; y < height; y++) {
       const src = (height - 1 - y) * width * 4;
       px.set(buf.subarray(src, src + width * 4), y * width * 4);
     }
-    for (let i = 3; i < px.length; i += 4) px[i] = 255;
+    if (transparent) {
+      // The RGB on white is the premultiplied foreground plus the transmitted white.
+      for (let i = 0; i < px.length; i += 4) {
+        const transmitted = px[i + 3];
+        const alpha = 255 - transmitted;
+        const scale = alpha ? 255 / alpha : 0;
+        px[i] = (px[i] - transmitted) * scale;
+        px[i + 1] = (px[i + 1] - transmitted) * scale;
+        px[i + 2] = (px[i + 2] - transmitted) * scale;
+        px[i + 3] = alpha;
+      }
+    } else {
+      for (let i = 3; i < px.length; i += 4) px[i] = 255;
+    }
     // release large supersampled buffers after big exports
     if (width * height > 4.2e6) this.releaseTargets(width * ss, height * ss);
     this.invalidate();
     return px;
   }
 
-  async exportPNG(width: number, height: number): Promise<Blob> {
-    const px = this.renderPixels(width, height);
+  async exportPNG(width: number, height: number, transparent = false): Promise<Blob> {
+    const px = this.renderPixels(width, height, transparent);
     const c = document.createElement('canvas');
     c.width = width;
     c.height = height;
-    const ctx = c.getContext('2d', { alpha: false })!;
+    const ctx = c.getContext('2d', { alpha: transparent })!;
     ctx.putImageData(new ImageData(px as unknown as Uint8ClampedArray<ArrayBuffer>, width, height), 0, 0);
     return await new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('PNG encoding failed'))), 'image/png'));
   }

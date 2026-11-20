@@ -180,6 +180,41 @@ try {
   check('glass colour choice changes the render and Default restores it', g1 !== g2 && g1 === g3, `${g1} ${g2} ${g3}`);
   check('coordinates unchanged by colour choice', (await page.evaluate(() => window.molart.fingerprint())) === fp0);
 
+  // Transparent export through the browser UI, including transmission inside the glass.
+  const more = page.getByRole('button', { name: 'More', exact: true });
+  await more.click();
+  const transparent = page.getByRole('checkbox', { name: 'Transparent background' });
+  await transparent.check();
+  await page.getByRole('combobox', { name: 'Export size' }).selectOption('1024');
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Export', exact: true }).click();
+  const glassPNG = await page.locator('.exportbox img').evaluate(async (img) => {
+    await img.decode();
+    const canvas = document.createElement('canvas');
+    const w = canvas.width = img.naturalWidth;
+    const h = canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    const pixels = ctx.getImageData(0, 0, w, h).data;
+    const alpha = (x, y) => pixels[(y * w + x) * 4 + 3];
+    let translucent = 0;
+    for (let y = 5; y < h - 5; y++) {
+      for (let x = 5; x < w - 5; x++) {
+        const a = alpha(x, y);
+        if (a > 16 && a < 239 && alpha(x - 5, y) && alpha(x + 5, y) && alpha(x, y - 5) && alpha(x, y + 5)) translucent++;
+      }
+    }
+    return { w, h, corners: [alpha(0, 0), alpha(w - 1, 0), alpha(0, h - 1), alpha(w - 1, h - 1)], translucent };
+  });
+  check('transparent Glass PNG has clear corners and translucent interior pixels',
+    glassPNG.w === 1024 && glassPNG.h === 1024 && glassPNG.corners.every((a) => a === 0) && glassPNG.translucent > 250,
+    JSON.stringify(glassPNG));
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
+  await more.click();
+  await transparent.uncheck();
+  await page.getByRole('combobox', { name: 'Export size' }).selectOption('2048');
+  await page.keyboard.press('Escape');
+
   // mark stability: a 0.5° rotation should change few pixels (marks travel with the protein)
   const stability = await page.evaluate(async () => {
     const m = window.molart;
