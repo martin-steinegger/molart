@@ -197,6 +197,7 @@ uniform float uWaxLayers;    // translucent body: strength of the outlines seen 
 uniform vec2 uWax;           // translucent body: (absorption per Å, fade of thin parts towards paper); x = 0 disables
 uniform float uGlass;        // 1 = resolve the layers as tinted glass
 uniform float uGlassDensity;
+uniform vec3 uGlassDeep;     // colour of deep glass (linear rgb): what the tint turns to where there is a lot of glass in the line of sight
 uniform float uGlassRefr;
 uniform float uGlassThick;   // nominal thickness (Å) of a piece whose back face is unknown
 uniform vec2 uRig;           // the studio lights turn with the user's light: (cos, sin) of its angle
@@ -212,13 +213,16 @@ float glassSpec(vec3 n){
   vec3 h1 = normalize(normalize(vec3(-0.45, 0.65, 0.62)) + vec3(0.0, 0.0, 1.0));
   vec3 h2 = normalize(normalize(vec3(0.62, 0.12, 0.6)) + vec3(0.0, 0.0, 1.0));
   float a = max(dot(n, h1), 0.0), b = max(dot(n, h2), 0.0);
-  return pow(a, 240.0) * 1.1 + pow(a, 26.0) * 0.14 + pow(b, 110.0) * 0.4;
+  return pow(a, 240.0) * 1.1 + pow(a, 26.0) * 0.05 + pow(b, 110.0) * 0.3;
 }
 // colour of light after crossing a glass piece seen through its surface with normal n
 vec3 glassBody(vec3 tint, vec3 n, float thick){
   float nz = clamp(abs(n.z), 0.0, 1.0);
   float rim = pow(1.0 - nz, 3.0);
-  return pow(max(tint, vec3(1e-3)), vec3(thick * uGlassDensity + rim * 1.6));
+  // thin glass seen face-on is almost clear; the colour builds up faster than the thickness and turns to the deep colour
+  float path = min(thick * sqrt(max(thick, 0.0)) * uGlassDensity + rim * 1.0, 2.4);
+  vec3 t = mix(tint, uGlassDeep, sstep(0.8, 2.4, path) * 0.75);
+  return pow(max(t, vec3(1e-3)), vec3(path));
 }
 
 float widthAt(float t){ return uWidth * (1.0 + uWidthVar * (vnoise1(t * uFreq * 1.7 + uSeed) * 2.0 - 1.0)); }
@@ -309,6 +313,9 @@ void main(){
     float has1 = step(1e-4, p1.w);
     float thick = mix(uGlassThick / max(nz, 0.3), clamp(p1.w - s0.w, 0.0, 4.5), has1);
     float dExit = s0.w + thick;
+    // a thick round rod (a helix as glass cane) is drawn as blown glass, a clear tube with coloured walls: light crosses two
+    // walls, not the full width, so the middle stays light and the colour gathers at the edges
+    thick = mix(thick, 0.95 / max(nz, 0.3), sstep(3.3, 4.2, thick));
     // what is behind this piece, looked up along the refracted ray
     vec2 ruv = vUv - n.xy * uGlassRefr * uPx * uTexel * (0.4 + 0.3 * thick);
     vec4 b2s = texture(tPeel2Surf, ruv);
@@ -321,12 +328,18 @@ void main(){
     vec3 bn = texture(tPeel2Normal, ruv).xyz * useB2 + texture(tNormal, ruv).xyz * useB0 + texture(tPeel2Normal, vUv).xyz * useD2;
     float found = clamp(useB2 + useB0 + useD2, 0.0, 1.0);
     bn = normalize(bn + vec3(0.0, 0.0, 1e-4));
-    vec3 back = mix(paper, glassBody(max(bt, vec3(1e-3)), bn, uGlassThick / max(abs(bn.z), 0.4)) + vec3(glassSpec(bn) * 0.3), found);
+    // glass seen through glass turns to the deep colour: overlaps read as depth, not as more of the same pink
+    // ... except the far side of the same coil: a helix seen through its own turns stays light and reads as one piece
+    float tb = b2s.x * useB2 + b0s.x * useB0 + d2s.x * useD2;
+    float selfT = found * (1.0 - sstep(4.0, 7.5, abs(tb - s0.x)));
+    bt = mix(bt, uGlassDeep, 0.55 * found * (1.0 - selfT));
+    vec3 back = mix(paper, glassBody(max(bt, vec3(1e-3)), bn, mix(1.15, 0.45, selfT) * uGlassThick / max(abs(bn.z), 0.4)) + vec3(glassSpec(bn) * 0.2), found);
+    back = mix(back, paper, 0.35 * selfT);
     col = back * glassBody(c0.rgb, n, thick);
     // the glass has body: part of the light is scattered in the tinted mass instead of passing through
     float wrap = dot(rig(n), normalize(vec3(-0.45, 0.65, 0.62))) * 0.5 + 0.5;
     vec3 solid = pow(max(c0.rgb, vec3(1e-3)), vec3(1.25)) * (0.66 + 0.4 * wrap);
-    col = mix(col, solid, 0.13);
+    col = mix(col, solid, 0.05);
     // the far face of this piece: its own faint highlights, and its edges read as lines inside the glass
     vec3 n1 = normalize(texture(tPeelNormal, vUv).xyz + vec3(0.0, 0.0, 1e-4));
     col += uRigCol * (glassSpec(n1) * 0.25 * has1);
@@ -340,29 +353,30 @@ void main(){
     float isBar = step(1.5, c0.a) * sstep(0.6, 0.85, abs(s0.z));
     float wav = (vnoise1(s0.x * 0.55 + uSeed) - 0.5) * 1.1 + 0.25 * sin(s0.x * 1.3);
     float streak = 1.0 - sstep(0.03, 0.09, abs(s0.y - wav));
-    col *= mix(vec3(1.0), mix(vec3(1.0), c0.rgb, 0.4), isBar * streak);
+    col *= mix(vec3(1.0), mix(vec3(1.0), c0.rgb, 0.12), isBar * streak);
     // cut ends are dense: nearly opaque, in the deep tone of the glass
     float cut = 1.0 - step(0.16, max(c0.r, max(c0.g, c0.b)));
-    col = mix(col, c0.rgb * (1.6 + 2.2 * wrap), cut);
+    col = mix(col, min(c0.rgb / 0.12, vec3(1.0)) * (0.62 + 0.38 * wrap), cut);
     // polished surface. Broad bar faces are treated as very slightly pillowed, so the studio lights
     // reflect as long streaks running along the bar instead of switching a whole flat face on or off.
     vec2 ag = vec2(dFdx(s0.y), dFdy(s0.y));
     float agl = length(ag);
     ag = ag / max(agl, 1e-6) * step(1e-6, agl) * (1.0 - step(0.5, agl));
-    vec3 ng = normalize(n + vec3(ag * s0.y * 0.42 * isBar, 0.0));
+    vec3 ng = normalize(n + vec3(ag * s0.y * 0.2 * isBar, 0.0));
     float gz = clamp(ng.z, 0.0, 1.0);
     float fres = 0.05 + 0.95 * pow(1.0 - gz, 5.0);
     vec3 rr = rig(2.0 * ng.z * ng - vec3(0.0, 0.0, 1.0));
     // hard-edged soft boxes: a big key window upper left, a thin strip on the right, a low fill bar
-    float key = sstep(-0.74, -0.70, rr.x) * (1.0 - sstep(-0.16, -0.12, rr.x)) * sstep(0.16, 0.20, rr.y) * (1.0 - sstep(0.80, 0.84, rr.y));
-    float mull = 1.0 - 0.75 * (1.0 - sstep(0.0, 0.025, abs(rr.x + 0.43)));           // the window's glazing bar
+    // a soft-edged overhead light upper left (an even studio, no window frame), a thin strip on the right, a low fill bar
+    float key = sstep(-0.95, -0.55, rr.x) * (1.0 - sstep(-0.3, 0.1, rr.x)) * sstep(0.0, 0.35, rr.y) * (1.0 - sstep(0.7, 0.95, rr.y));
+    float mull = 1.0;
     float strip = sstep(0.40, 0.43, rr.x) * (1.0 - sstep(0.52, 0.55, rr.x)) * sstep(-0.7, -0.6, rr.y) * (1.0 - sstep(0.75, 0.85, rr.y));
     float fill = sstep(-0.62, -0.58, rr.y) * (1.0 - sstep(-0.44, -0.40, rr.y)) * (1.0 - sstep(0.5, 0.7, abs(rr.x)));
     float sky = sstep(0.1, 0.9, rr.y);
     // the dark side of the studio reflects too: it deepens the glass between the lights
-    col *= 1.0 - 0.22 * (1.0 - sky) * (1.0 - cut);
-    float refl = key * mull * 0.80 + strip * 0.55 + fill * 0.22 + sky * 0.10;
-    col = mix(col, vec3(0.985, 0.975, 1.0) * uRigCol, clamp(refl * (0.42 + 0.58 * fres) + fres * 0.45, 0.0, 1.0) * (1.0 - 0.85 * cut));
+    col *= 1.0 - 0.08 * (1.0 - sky) * (1.0 - cut);
+    float refl = key * mull * 0.30 + strip * 0.25 + fill * 0.08 + sky * 0.08;
+    col = mix(col, vec3(0.985, 0.975, 1.0) * uRigCol, clamp(refl * (0.3 + 0.7 * fres) + fres * 0.22, 0.0, 1.0) * (1.0 - 0.6 * cut));
     col += uRigCol * glassSpec(ng);
   }
 

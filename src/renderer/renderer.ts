@@ -182,6 +182,7 @@ export class MolartRenderer {
         uWaxBehind: { value: 0.82 },
         uWaxSoft: { value: 0 },
         uGlassDensity: { value: 0 },
+        uGlassDeep: { value: new THREE.Vector3(1, 1, 1) },
         uGlassRefr: { value: 0 },
         uGlassThick: { value: 0.8 },
       },
@@ -848,6 +849,9 @@ export class MolartRenderer {
       u.uRig.value.set(Math.cos(rigA), Math.sin(rigA));
       u.uRigCol.value.set(Math.pow(rigC[0], 2.2), Math.pow(rigC[1], 2.2), Math.pow(rigC[2], 2.2));
       u.uGlassDensity.value = glass?.density ?? 0;
+      // the colour the glass turns where one looks through a lot of it (the style's second colour, or the user's)
+      const deep = (glass && this.styleColors()?.[1]) || glass?.colors[1] || [1, 1, 1];
+      u.uGlassDeep.value.set(Math.pow(deep[0], 2.2), Math.pow(deep[1], 2.2), Math.pow(deep[2], 2.2));
       u.uGlassRefr.value = glass?.refraction ?? 0;
       u.uGlassThick.value = style.ribbon?.strandThickness ?? 0.8;
       u.uTexel.value.set(1 / gw, 1 / gh);
