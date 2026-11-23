@@ -61,8 +61,6 @@ node cli/molart.mjs styles
   [LinkedIn post](https://www.linkedin.com/feed/update/urn:li:activity:7526936072279212032/) by Latent Labs.
 - The ASCII style is inspired by [ascii-fold](https://github.com/mitsenkov/ascii-fold) by
   Maxim Tsenkov.
-- Sample structures in `public/samples/` (1TIM, 3CHY, 1UBQ, 4HHB, 1BNA, 1EHZ, 1AAY) are unmodified downloads from
-  the [RCSB PDB](https://www.rcsb.org) (CC0 1.0).
 
 ## License
 
