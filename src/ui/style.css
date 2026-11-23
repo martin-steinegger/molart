@@ -32,6 +32,8 @@ button, select, input {
   border: 0; border-radius: 999px; background: var(--field); padding: 7px 14px;
 }
 select { padding-right: 10px; }
+/* phones zoom the whole page into any field whose text is under 16px, and do not zoom back out */
+@media (pointer: coarse) { select, input:not([type='range']):not([type='color']):not([type='checkbox']) { font-size: 16px; } }
 button { cursor: pointer; transition: background 0.15s, color 0.15s; }
 button:hover { background: var(--line); }
 button:focus-visible, select:focus-visible, input:focus-visible, canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
