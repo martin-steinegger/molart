@@ -386,6 +386,8 @@ export class App {
       drawer.classList.toggle('open', open);
       drawer.toggleAttribute('inert', !open);
       scrim.classList.toggle('hidden', !open);
+      // on a phone the panel is a sheet under the picture: the page makes room so the structure stays in view
+      drawer.parentElement?.classList.toggle('sheet-open', open);
       moreBtn.setAttribute('aria-expanded', String(open));
     };
     moreBtn.addEventListener('click', () => setDrawer(!drawer.classList.contains('open')));
