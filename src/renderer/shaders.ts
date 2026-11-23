@@ -74,7 +74,11 @@ uniform vec3 uColA;   // user-selectable style colours (sRGB); used by styles th
 uniform vec3 uColB;
 // sun: cast shadows from the key light (a depth picture taken from the light), off unless the user turns the sun on
 uniform sampler2D tShadow;
-uniform mat4 uShadowMat;    // object space -> light clip space
+uniform mat4 uShadowMat[4]; // object space -> each light's clip space
+uniform vec3 uShadowTile[4]; // each light's tile in the depth picture: offset.xy, scale
+uniform vec3 uLightDir[4];  // towards each light, view space
+uniform vec3 uLightCol[4];  // each light's colour, linear rgb
+uniform float uLightN;      // how many lights are on
 uniform float uShadowOn;
 uniform float uShadowTexel; // one shadow-map texel in uv
 uniform float uSunAmt;      // how much of the sun's light and shade this material takes (glass: little, its light is in the reflections)
@@ -115,22 +119,26 @@ void main(){
   {
     // sunlight: what the sun reaches takes its colour; what it does not reach falls into a cool, darker shade
     vec3 on = normalize(vObjN) * (gl_FrontFacing ? 1.0 : -1.0);
-    vec4 sc = uShadowMat * vec4(vObjPos + on * 0.35, 1.0);
-    vec3 sp = sc.xyz / sc.w * 0.5 + 0.5;
     float ang = hash12(gl_FragCoord.xy) * 6.2831853, ca = cos(ang), sa = sin(ang);
-    float lit = 0.0;
-    for (int i = 0; i < 8; i++) {
-      float fi = float(i) + 0.5;
-      float rr = sqrt(fi / 8.0) * 2.0, th = fi * 2.3999632;
-      vec2 o = vec2(cos(th), sin(th)) * rr;
-      o = vec2(o.x * ca - o.y * sa, o.x * sa + o.y * ca) * uShadowTexel;
-      lit += step(sp.z - 0.0012, texture(tShadow, sp.xy + o).r);
+    // several lights: each colours what it alone reaches, they mix where they meet, and only what none reaches is in shade
+    float dark = 1.0, wsum = 0.0;
+    vec3 sum = vec3(0.0);
+    for (int j = 0; j < 4; j++) {
+      vec4 sc = uShadowMat[j] * vec4(vObjPos + on * 0.35, 1.0);
+      vec3 sp = sc.xyz / sc.w * 0.5 + 0.5;
+      float lit = 0.0;
+      for (int i = 0; i < 8; i++) {
+        float fi = float(i) + 0.5;
+        float rr = sqrt(fi / 8.0) * 2.0, th = fi * 2.3999632;
+        vec2 o = vec2(cos(th), sin(th)) * rr;
+        o = vec2(o.x * ca - o.y * sa, o.x * sa + o.y * ca) * uShadowTexel;
+        lit += step(sp.z - 0.0012, texture(tShadow, clamp(sp.xy + o, 0.0, 1.0) * uShadowTile[j].z + uShadowTile[j].xy).r);
+      }
+      float direct = lit / 8.0 * sstep(-0.1, 0.55, dot(n, uLightDir[j])) * step(float(j) + 0.5, uLightN);
+      dark *= 1.0 - direct; sum += uLightCol[j] * direct; wsum += direct;
     }
-    lit /= 8.0;
-    float facing = sstep(-0.1, 0.55, dot(n, normalize(uKey)));
-    float direct = lit * facing;
     vec3 shade = vec3(0.34, 0.38, 0.56);
-    c *= mix(vec3(1.0), mix(shade, uSun * 1.12, direct), uShadowOn * uSunAmt);
+    c *= mix(vec3(1.0), mix(shade, sum / max(wsum, 1e-4) * 1.12, 1.0 - dark), uShadowOn * uSunAmt);
   }
   gColor = vec4(max(c, vec3(0.0)), 1.0 + s.ss);
   gSurf = vec4(s.t, s.across, s.faceY, -vViewPos.z);

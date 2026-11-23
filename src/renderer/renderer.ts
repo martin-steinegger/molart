@@ -14,6 +14,16 @@ import { ASCII_FRAG, COMPOSITE_FRAG, DEPTH_FRAG, DOWNSAMPLE_FRAG, FULLSCREEN_VER
 
 export const RENDERER_VERSION = '0.1.0';
 
+export interface SunLight { x: number; y: number; color: [number, number, number] }
+/** most lights the sun can hold */
+export const MAX_LIGHTS = 4;
+/** a light's direction in view space from its place on the pad (kept off the exact rim, where shadows degenerate) */
+export function lightDir(x: number, y: number): [number, number, number] {
+  const r = Math.hypot(x, y), f = r > 0.95 ? 0.95 / r : 1;
+  const px = x * f, py = y * f;
+  return [px, py, Math.sqrt(Math.max(0, 1 - px * px - py * py))];
+}
+
 export interface CameraState {
   position: [number, number, number];
   target: [number, number, number];
@@ -38,8 +48,12 @@ export interface RenderParams {
   artBlend?: number;
   /** Text styles (ASCII Fold): share of the picture drawn as text, 0 (all ribbon) .. 1 (all text); null = the style's default blend. */
   ascii?: number | null;
-  /** Sun: a low key light that casts shadows, turned by `angle` degrees about the viewing direction from upper left, with an sRGB colour. null = off (each style's own even light). */
-  light?: { angle: number; color: [number, number, number] } | null;
+  /**
+   * Sun: up to four lights that cast shadows. Each stands at (x, y) on the unit disc seen from the camera (x right, y up;
+   * the centre is light from the viewer, the rim is grazing light) and has an sRGB colour. The first one is the key light
+   * that the styles' own shading follows. null or empty = off (each style's own even light).
+   */
+  light?: SunLight[] | null;
 }
 
 /** Deterministic 32-bit hash of a string → float seed in [0, 1000). */
@@ -90,10 +104,11 @@ export class MolartRenderer {
   private geomCache = new Map<string, THREE.BufferGeometry>();
   private matCache = new Map<string, THREE.RawShaderMaterial>();
   /** sun (cast shadows): uniforms shared by every surface material, a depth picture from the light, its camera */
-  private sunU = { tShadow: { value: null as THREE.Texture | null }, uShadowMat: { value: new THREE.Matrix4() }, uShadowOn: { value: 0 }, uShadowTexel: { value: 1 / 2048 } };
-  private sunDir = new THREE.Vector3(-0.42, 0.62, 0.66).normalize();   // towards the light, view space
+  private sunU = { tShadow: { value: null as THREE.Texture | null }, uShadowMat: { value: [0, 1, 2, 3].map(() => new THREE.Matrix4()) }, uShadowTile: { value: [0, 1, 2, 3].map(() => new THREE.Vector3(0, 0, 1)) }, uLightDir: { value: [0, 1, 2, 3].map(() => new THREE.Vector3(0, 0, 1)) }, uLightCol: { value: [0, 1, 2, 3].map(() => new THREE.Vector3(1, 1, 1)) }, uLightN: { value: 0 }, uShadowOn: { value: 0 }, uShadowTexel: { value: 1 / 2048 } };
+  private sunDirs: THREE.Vector3[] = [];   // towards each light, view space
   private sunCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
   private sunTarget: THREE.WebGLRenderTarget | null = null;
+  private lights(): SunLight[] { return (this.params.light ?? []).slice(0, MAX_LIGHTS); }
   private gbuf: THREE.WebGLRenderTarget | null = null;
   private peelCache = new Map<string, THREE.RawShaderMaterial>();
   private dummyTex = new THREE.DataTexture(new Uint8Array(4), 1, 1);
@@ -603,13 +618,16 @@ export class MolartRenderer {
     const cols = this.styleColors();
     // key light expressed in model space at the default view: "painted-on" lighting for styles that want it
     const [ax, ay, az] = this.frame!.axes;
-    // the key light may be turned about the viewing direction and given a colour (display only)
-    const la = ((this.params.light?.angle ?? 0) * Math.PI) / 180, lc = Math.cos(la), ls = Math.sin(la);
-    // with the sun on the light stands lower, so that shadows fall across the picture
-    const kz = this.params.light ? 0.3 : 0.66;
-    const k = [-0.42 * lc - 0.62 * ls, -0.42 * ls + 0.62 * lc, kz];
-    this.sunDir.set(k[0], k[1], k[2]).normalize();
-    const sun = (this.params.light?.color ?? [1, 1, 1]).map((v) => Math.pow(v, 2.2));
+    // the sun's lights may stand anywhere in front of the protein and have a colour (display only); the first is the key light
+    const lights = this.lights();
+    this.sunDirs = lights.map((l) => new THREE.Vector3(...lightDir(l.x, l.y)));
+    const k = lights.length ? this.sunDirs[0].toArray() : [-0.42, 0.62, 0.66];
+    const sun = (lights[0]?.color ?? [1, 1, 1]).map((v) => Math.pow(v, 2.2));
+    this.sunU.uLightN.value = lights.length;
+    lights.forEach((l, i) => {
+      this.sunU.uLightDir.value[i].copy(this.sunDirs[i]);
+      this.sunU.uLightCol.value[i].set(Math.pow(l.color[0], 2.2), Math.pow(l.color[1], 2.2), Math.pow(l.color[2], 2.2));
+    });
     groups.forEach((g, gi) => {
       for (const c of g.chains) if (c < tex.length) tex[c] = gi;
       const geom = (g.art && blend !== undefined && blend < 1 ? this.blendFor(g.style, Math.max(0, blend)) : null) ?? this.geometryFor(g.style, g.art);
@@ -714,7 +732,7 @@ export class MolartRenderer {
     }
     // sun: a depth picture of the whole protein from the light, read by every surface shader for cast shadows
     this.sunU.uShadowOn.value = 0;
-    if (this.params.light) {
+    if (this.sunDirs.length) {
       if (!this.sunTarget) {
         this.sunTarget = new THREE.WebGLRenderTarget(2048, 2048, { type: THREE.UnsignedByteType, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, depthBuffer: true });
         this.sunTarget.depthTexture = new THREE.DepthTexture(2048, 2048, THREE.UnsignedIntType);
@@ -727,20 +745,30 @@ export class MolartRenderer {
         radius = Math.max(radius, g.boundingSphere!.center.distanceTo(centre) + g.boundingSphere!.radius);
       }
       cam.updateMatrixWorld();
-      const dir = this.sunDir.clone().transformDirection(cam.matrixWorld);
-      const sc = this.sunCam;
-      sc.left = sc.bottom = -radius; sc.right = sc.top = radius; sc.near = 0.1; sc.far = 4 * radius;
-      sc.position.copy(centre).addScaledVector(dir, 2 * radius);
-      sc.up.copy(cam.up);
-      sc.lookAt(centre);
-      sc.updateProjectionMatrix(); sc.updateMatrixWorld();
       this.layers.forEach((l) => { l.mesh.visible = true; l.mesh.material = l.depth; });
-      r.setRenderTarget(this.sunTarget);
+      // one light has the whole depth picture; two to four share it as tiles
+      const per = this.sunDirs.length > 1 ? 2 : 1, tile = 2048 / per, st = this.sunTarget;
+      st.scissorTest = false; st.viewport.set(0, 0, 2048, 2048);
+      r.setRenderTarget(st);
       r.setClearColor(0x000000, 0);
       r.clear(true, true, true);
-      r.render(this.scene, sc);
-      this.sunU.tShadow.value = this.sunTarget.depthTexture;
-      this.sunU.uShadowMat.value.multiplyMatrices(sc.projectionMatrix, sc.matrixWorldInverse);
+      const sc = this.sunCam;
+      this.sunDirs.forEach((d, i) => {
+        const dir = d.clone().transformDirection(cam.matrixWorld);
+        sc.left = sc.bottom = -radius; sc.right = sc.top = radius; sc.near = 0.1; sc.far = 4 * radius;
+        sc.position.copy(centre).addScaledVector(dir, 2 * radius);
+        sc.up.copy(cam.up);
+        sc.lookAt(centre);
+        sc.updateProjectionMatrix(); sc.updateMatrixWorld();
+        const tx = i % per, ty = Math.floor(i / per);
+        st.viewport.set(tx * tile, ty * tile, tile, tile); st.scissor.set(tx * tile, ty * tile, tile, tile); st.scissorTest = true;
+        r.setRenderTarget(st);
+        r.render(this.scene, sc);
+        this.sunU.uShadowMat.value[i].multiplyMatrices(sc.projectionMatrix, sc.matrixWorldInverse);
+        this.sunU.uShadowTile.value[i].set(tx / per, ty / per, 1 / per);
+      });
+      st.scissorTest = false; st.viewport.set(0, 0, 2048, 2048);
+      this.sunU.tShadow.value = st.depthTexture;
       this.sunU.uShadowOn.value = 1;
     }
     // a layer hides what is behind it unless it is see-through
@@ -814,7 +842,9 @@ export class MolartRenderer {
       u.uWaxBehind.value = wax?.behind ?? 0.82;
       u.uWaxSoft.value = wax?.soft ?? 0;
       u.uGlass.value = glass ? 1 : 0;
-      const rigA = ((this.params.light?.angle ?? 0) * Math.PI) / 180, rigC = this.params.light?.color ?? [1, 1, 1];
+      // the studio lights of the glass turn with the key light (0 = its default place, upper left)
+      const key = this.lights()[0], keyDir = key ? lightDir(key.x, key.y) : null;
+      const rigA = keyDir && Math.hypot(keyDir[0], keyDir[1]) > 0.05 ? Math.atan2(keyDir[1], keyDir[0]) - Math.atan2(0.62, -0.42) : 0, rigC = key?.color ?? [1, 1, 1];
       u.uRig.value.set(Math.cos(rigA), Math.sin(rigA));
       u.uRigCol.value.set(Math.pow(rigC[0], 2.2), Math.pow(rigC[1], 2.2), Math.pow(rigC[2], 2.2));
       u.uGlassDensity.value = glass?.density ?? 0;

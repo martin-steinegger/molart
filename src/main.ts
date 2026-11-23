@@ -25,6 +25,8 @@ const api = {
   setStyle: (id: string) => app.setStyle(getStyle(id).id),
   setSeed: (seed: number) => app.setSeed(seed),
   setLight: (angle: number | null, color?: string) => app.setLight(angle, color),
+  /** Sun with up to four lights: each {x, y, color} stands at (x, y) on the unit disc seen from the camera (x right, y up); null = off. */
+  setLights: (lights: { x: number; y: number; color: string }[] | null) => app.setLights(lights),
   // scripted use: one explicit amount for every deformable style (the UI keeps one slider per style)
   setDeform: (v: number) => app.setDeform(v, true),
   /** Two sRGB hex colours for styles with a colour choice (Glass); null restores the defaults. */

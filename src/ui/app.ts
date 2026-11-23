@@ -1,7 +1,7 @@
 import { loadStructure } from '../io/load';
 import { coordinateFingerprint, Structure } from '../model/structure';
 import { allStyles, getStyle } from '../art/registry';
-import { CameraState, MolartRenderer, RENDERER_VERSION } from '../renderer/renderer';
+import { CameraState, MAX_LIGHTS, MolartRenderer, RENDERER_VERSION } from '../renderer/renderer';
 
 const SAMPLES = [
   { id: '1TIM', label: '1TIM — triosephosphate isomerase (TIM barrel, 2 chains)' },
@@ -32,7 +32,11 @@ interface Settings {
   artMode?: boolean;
   /** ASCII Fold: share of the picture drawn as text (0..1). */
   asciiAmount?: number;
-  /** key light: degrees turned from the default direction, and its colour (hex) */
+  /** the sun's lights: where each stands on the pad (x right, y up, unit disc) and its colour (hex); the first is the key light */
+  lights?: PadLight[];
+  /** whether the sun is on */
+  sun?: boolean;
+  /** before the pad: one light as degrees turned from upper left (read once, then replaced by `lights`) */
   light?: { angle: number; color: string };
 }
 
@@ -82,6 +86,24 @@ const h = <K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string, 
   return el;
 };
 
+export interface PadLight { x: number; y: number; color: string }
+/** where a new first, second, ... light stands, and its colour */
+const LIGHT_DEFAULTS: PadLight[] = [
+  { x: -0.52, y: 0.77, color: '#ffffff' },
+  { x: 0.72, y: 0.3, color: '#ffb060' },
+  { x: -0.62, y: -0.5, color: '#7fb4ff' },
+  { x: 0.3, y: -0.8, color: '#ff8fb0' },
+];
+/** the pad position of the old one-slider light: upper left, turned by `angle` degrees about the viewing direction */
+const angleToPad = (angle: number) => {
+  const a = (angle * Math.PI) / 180, c = Math.cos(a), sn = Math.sin(a), n = Math.hypot(0.42, 0.62, 0.3);
+  return { x: (-0.42 * c - 0.62 * sn) / n, y: (-0.42 * sn + 0.62 * c) / n };
+};
+const onPad = (x: number, y: number) => {
+  const r = Math.hypot(x, y), f = r > 0.95 ? 0.95 / r : 1;
+  return { x: Math.round(x * f * 1000) / 1000, y: Math.round(y * f * 1000) / 1000 };
+};
+
 export class App {
   r: MolartRenderer;
   structure: Structure | null = null;
@@ -111,6 +133,13 @@ export class App {
       exportSize: 2048,
       ...(store.get<Settings>(SETTINGS_KEY) ?? {}),
     };
+    // settings from before the light pad: one light given as an angle, on whenever present
+    if (this.settings.light && !this.settings.lights) {
+      const at = angleToPad(this.settings.light.angle);
+      this.settings.lights = [{ ...onPad(at.x, at.y), color: this.settings.light.color }];
+      this.settings.sun = true;
+    }
+    delete this.settings.light;
     // Safe start: if the page died while drawing something last time, do not walk into the same state again.
     const pend = store.get<{ style?: string; art?: boolean }>(PENDING_KEY);
     if (pend && typeof pend.style === 'string') {
@@ -276,16 +305,63 @@ export class App {
     els.error = h('div', { class: 'error' });
     els.sampleSel = sampleSel;
 
-    // light: where the key light comes from and its colour
-    const lightAngle = h('input', { id: 'lightAngle', type: 'range', min: '0', max: '355', step: '5', value: String(this.settings.light?.angle ?? 0), 'aria-label': 'Light direction' }) as HTMLInputElement;
-    const lightColor = h('input', { id: 'lightColor', type: 'color', value: this.settings.light?.color ?? '#ffffff', 'aria-label': 'Light colour', title: 'Light colour' }) as HTMLInputElement;
-    const lightOn = h('button', { id: 'sunBtn', 'aria-pressed': String(!!this.settings.light), title: 'Sunlight with cast shadows' }, 'Sun');
-    lightAngle.addEventListener('input', () => this.setLight(parseFloat(lightAngle.value), lightColor.value));
-    lightColor.addEventListener('input', () => this.setLight(parseFloat(lightAngle.value), lightColor.value));
-    lightOn.addEventListener('click', () => (this.settings.light ? this.setLight(null) : this.setLight(parseFloat(lightAngle.value), lightColor.value)));
+    // light: a pad with one dot per light (the protein seen from the camera: centre = light from the viewer, rim = grazing light)
+    const lightPad = h('div', { id: 'lightPad', class: 'pad', role: 'group', 'aria-label': 'Where the lights stand' });
+    const lightColor = h('input', { id: 'lightColor', type: 'color', value: '#ffffff', 'aria-label': 'Colour of the selected light', title: 'Colour of the selected light' }) as HTMLInputElement;
+    const lightOn = h('button', { id: 'sunBtn', 'aria-pressed': 'false', title: 'Sunlight with cast shadows' }, 'Sun');
+    const lightAdd = h('button', { id: 'lightAdd', title: 'Add a light', 'aria-label': 'Add a light' }, '+');
+    const lightDel = h('button', { id: 'lightDel', title: 'Remove the selected light', 'aria-label': 'Remove the selected light' }, '−');
+    const padXY = (e: PointerEvent) => {
+      const b = lightPad.getBoundingClientRect(), R = b.width / 2;
+      return onPad((e.clientX - b.left - R) / R, -(e.clientY - b.top - R) / R);
+    };
+    const moveSel = (x: number, y: number) => {
+      const ls = this.padLights().map((l) => ({ ...l }));
+      ls[this.lightSel] = { ...ls[this.lightSel], ...onPad(x, y) };
+      this.setLights(ls);
+    };
+    let dragging = false;
+    lightPad.addEventListener('pointerdown', (e) => {
+      const dot = (e.target as HTMLElement).closest('.dot') as HTMLElement | null;
+      if (dot) this.lightSel = Number(dot.dataset.i);
+      const p = padXY(e);
+      if (!dot) moveSel(p.x, p.y);
+      else this.setLights(this.padLights());
+      dragging = true;
+      lightPad.setPointerCapture(e.pointerId);
+      e.preventDefault();
+      (lightPad.children[this.lightSel] as HTMLElement | undefined)?.focus();
+    });
+    lightPad.addEventListener('pointermove', (e) => { if (dragging) { const p = padXY(e); moveSel(p.x, p.y); } });
+    const endDrag = () => { dragging = false; };
+    lightPad.addEventListener('pointerup', endDrag);
+    lightPad.addEventListener('pointercancel', endDrag);
+    lightPad.addEventListener('keydown', (e) => {
+      const dot = (e.target as HTMLElement).closest('.dot') as HTMLElement | null;
+      if (!dot) return;
+      this.lightSel = Number(dot.dataset.i);
+      const l = this.padLights()[this.lightSel], d = e.shiftKey ? 0.15 : 0.05;
+      const step: Record<string, [number, number]> = { ArrowLeft: [-d, 0], ArrowRight: [d, 0], ArrowUp: [0, d], ArrowDown: [0, -d] };
+      if (step[e.key]) { moveSel(l.x + step[e.key][0], l.y + step[e.key][1]); e.preventDefault(); }
+      else if (e.key === 'Delete' || e.key === 'Backspace') { this.removeLight(); e.preventDefault(); }
+      else return;
+      (lightPad.children[this.lightSel] as HTMLElement | undefined)?.focus();
+    });
+    lightColor.addEventListener('input', () => {
+      const ls = this.padLights().map((l) => ({ ...l }));
+      ls[this.lightSel].color = lightColor.value;
+      this.setLights(ls);
+    });
+    lightOn.addEventListener('click', () => this.setLights(this.settings.sun ? null : this.padLights()));
+    lightAdd.addEventListener('click', () => this.addLight());
+    lightDel.addEventListener('click', () => this.removeLight());
     els.lightOn = lightOn;
-    els.lightAngle = lightAngle;
+    els.lightPad = lightPad;
+    els.lightAdd = lightAdd;
+    els.lightDel = lightDel;
     els.lightColor = lightColor;
+    this.els = els;
+    this.syncLightUI();
     els.name = h('span', { class: 'name' });
     // a quiet invitation beside the sample's name; it goes away once the user's own structure is shown
     const touch = typeof matchMedia === 'function' && matchMedia('(hover: none)').matches;
@@ -302,7 +378,7 @@ export class App {
       h('header', {}, h('h1', {}, 'molart'), closeBtn),
       h('section', {}, h('h2', {}, 'Structure'), h('div', { class: 'row' }, openBtn, file, sampleSel), h('div', { class: 'row' }, pdbId, fetchBtn)),
       h('section', {}, h('h2', {}, 'Picture'), h('div', { class: 'row' }, h('label', {}, 'Seed ', seed), size), h('div', { class: 'row' }, resetBtn, camBtn, galleryBtn)),
-      h('section', {}, h('h2', {}, 'Light'), h('div', { class: 'row light' }, lightOn, lightAngle, lightColor)),
+      h('section', {}, h('h2', {}, 'Light'), h('div', { class: 'row light' }, lightPad, h('div', { class: 'lightside' }, lightOn, h('div', { class: 'row' }, lightAdd, lightDel, lightColor)))),
       h('section', {}, h('h2', {}, 'Style'), technique),
       h('section', {}, h('h2', {}, 'About'), els.info, h('p', { class: 'technique' }, 'Drag to rotate, scroll to zoom, right-drag to pan. R resets the view; keys 1–9 and 0 switch styles.')),
     );
@@ -629,23 +705,86 @@ export class App {
     this.saveSettings();
   }
 
-  private lightParam() {
-    const l = this.settings.light;
-    const c = l && hexToRgb(l.color);
-    return l && c ? { angle: l.angle, color: c } : null;
+  /** which light on the pad the colour and the keyboard act on */
+  private lightSel = 0;
+
+  /** the lights on the pad (there is always at least one, also while the sun is off) */
+  private padLights(): PadLight[] {
+    const ls = this.settings.lights;
+    return ls && ls.length ? ls : [{ ...LIGHT_DEFAULTS[0] }];
   }
 
-  /** Sun: on with a direction (degrees turned from upper left) and a hex colour; null turns it off. */
-  setLight(angle: number | null, color = '#ffffff') {
-    if (angle === null) delete this.settings.light;
-    else this.settings.light = { angle: ((angle % 360) + 360) % 360, color };
-    if (this.settings.light) {
-      (this.els.lightAngle as HTMLInputElement).value = String(this.settings.light.angle);
-      (this.els.lightColor as HTMLInputElement).value = this.settings.light.color;
+  private lightParam() {
+    if (!this.settings.sun) return null;
+    const out = this.padLights().map((l) => ({ x: l.x, y: l.y, color: hexToRgb(l.color) ?? ([1, 1, 1] as [number, number, number]) }));
+    return out.length ? out : null;
+  }
+
+  /** draw the pad from the settings: one dot per light, the selected one marked */
+  private syncLightUI() {
+    const pad = this.els.lightPad, ls = this.padLights();
+    this.lightSel = Math.max(0, Math.min(ls.length - 1, this.lightSel));
+    while (pad.children.length > ls.length) pad.lastElementChild!.remove();
+    while (pad.children.length < ls.length) pad.append(h('button', { class: 'dot', type: 'button' }));
+    ls.forEach((l, i) => {
+      const d = pad.children[i] as HTMLElement;
+      d.dataset.i = String(i);
+      d.style.left = `${50 + l.x * 50}%`;
+      d.style.top = `${50 - l.y * 50}%`;
+      d.style.background = l.color;
+      d.setAttribute('aria-pressed', String(i === this.lightSel));
+      d.setAttribute('aria-label', `Light ${i + 1}${i === 0 ? ' (key light)' : ''}: drag or use the arrow keys`);
+      d.title = `Light ${i + 1}${i === 0 ? ' (key light)' : ''}`;
+    });
+    pad.classList.toggle('off', !this.settings.sun);
+    (this.els.lightColor as HTMLInputElement).value = ls[this.lightSel].color;
+    this.els.lightOn.setAttribute('aria-pressed', String(!!this.settings.sun));
+    (this.els.lightAdd as HTMLButtonElement).disabled = ls.length >= MAX_LIGHTS;
+    (this.els.lightDel as HTMLButtonElement).disabled = ls.length <= 1;
+  }
+
+  /**
+   * Sun: up to four lights, each at (x, y) on the unit disc seen from the camera (x right, y up; centre = light from the
+   * viewer, rim = grazing light) with a hex colour. The first is the key light. null turns the sun off and keeps the lights.
+   */
+  setLights(lights: PadLight[] | null) {
+    if (lights === null) this.settings.sun = false;
+    else {
+      this.settings.lights = lights.slice(0, MAX_LIGHTS).map((l) => ({ ...onPad(l.x, l.y), color: hexToRgb(l.color) ? l.color : '#ffffff' }));
+      this.settings.sun = this.settings.lights.length > 0;
     }
-    this.els.lightOn.setAttribute('aria-pressed', String(!!this.settings.light));
+    this.syncLightUI();
     this.r.setParams({ light: this.lightParam() });
     this.saveSettings();
+  }
+
+  /** add a light at the next free default place (and turn the sun on) */
+  addLight() {
+    const ls = this.padLights();
+    if (ls.length >= MAX_LIGHTS) return;
+    const far = (d: PadLight) => Math.min(...ls.map((l) => Math.hypot(l.x - d.x, l.y - d.y)));
+    const next = LIGHT_DEFAULTS.slice().sort((a, b) => far(b) - far(a))[0];
+    this.lightSel = ls.length;
+    // a colour no light has yet, so the new one shows at once
+    const color = LIGHT_DEFAULTS.map((d) => d.color).find((c) => !ls.some((l) => l.color.toLowerCase() === c)) ?? next.color;
+    this.setLights([...ls, { x: next.x, y: next.y, color }]);
+  }
+
+  /** remove the selected light (the last one stays) */
+  removeLight() {
+    const ls = this.padLights();
+    if (ls.length <= 1) return;
+    const i = this.lightSel;
+    this.lightSel = Math.max(0, i - 1);
+    this.setLights(ls.filter((_, j) => j !== i));
+  }
+
+  /** One light the old way: degrees turned from upper left, and a hex colour; null turns the sun off. Other lights are kept. */
+  setLight(angle: number | null, color = '#ffffff') {
+    if (angle === null) return this.setLights(null);
+    const ls = this.padLights().map((l) => ({ ...l }));
+    ls[0] = { ...angleToPad(angle), color };
+    this.setLights(ls);
   }
 
   setSeed(seed: number) {

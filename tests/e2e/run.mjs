@@ -354,10 +354,23 @@ try {
       const turned = await m.exportPNGBase64(256, 256);
       m.setLight(0, '#ffb060');
       const tinted = await m.exportPNGBase64(256, 256);
+      m.setLights([{ x: -0.5, y: 0.7, color: '#ffffff' }]);
+      const one = await m.exportPNGBase64(256, 256);
+      m.setLights([{ x: -0.5, y: 0.7, color: '#ffffff' }, { x: 0.7, y: -0.2, color: '#4080ff' }]);
+      const two = await m.exportPNGBase64(256, 256);
+      m.setLights([{ x: 0.1, y: 0.1, color: '#ffffff' }]);
+      const front = await m.exportPNGBase64(256, 256);
+      const dots = document.querySelectorAll('#lightPad .dot').length;
+      document.getElementById('lightAdd').click();
+      const added = document.querySelectorAll('#lightPad .dot').length;
+      document.getElementById('lightDel').click();
+      const removed = document.querySelectorAll('#lightPad .dot').length;
       m.setLight(null);
-      return { a, turned, tinted, back: await m.exportPNGBase64(256, 256), fp: m.info().fingerprint };
+      return { a, turned, tinted, one, two, front, dots, added, removed, back: await m.exportPNGBase64(256, 256), fp: m.info().fingerprint };
     });
     check('sun: casts shadows, can be turned and coloured, and off restores the picture', l.turned !== l.a && l.tinted !== l.a && l.tinted !== l.turned && l.back === l.a);
+    check('sun: a second light changes the picture, and a light can stand anywhere on the pad', l.two !== l.one && l.front !== l.one && l.one !== l.a);
+    check('light pad: one dot per light, + adds one and − removes it', l.dots === 1 && l.added === 2 && l.removed === 1);
   }
 
   // memory: clicking through every style in both modes must not pile up meshes
