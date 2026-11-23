@@ -465,6 +465,7 @@ precision highp float;
 in vec2 vUv;
 uniform sampler2D tSrc;
 uniform vec2 uSrcTexel;
+uniform float uAlpha;        // weight when a frame is folded into a running mean (1 = plain copy)
 out vec4 outColor;
 void main(){
   // Source is 2x (or 1x) the output size. A bilinear tap at the output pixel centre averages the
@@ -474,7 +475,7 @@ void main(){
   c += texture(tSrc, vUv + vec2(-1.0,  1.0) * uSrcTexel).rgb * 0.125;
   c += texture(tSrc, vUv + vec2( 1.0, -1.0) * uSrcTexel).rgb * 0.125;
   c += texture(tSrc, vUv + vec2(-1.0, -1.0) * uSrcTexel).rgb * 0.125;
-  outColor = vec4(c, 1.0);
+  outColor = vec4(c, uAlpha);
 }`;
 
 

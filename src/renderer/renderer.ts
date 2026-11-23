@@ -124,6 +124,11 @@ export class MolartRenderer {
   private interacting = false;
   private lastGoodCamera: CameraState | null = null;
   private fastOut: THREE.WebGLRenderTarget | null = null;
+  // anti-aliasing: sharp frames are drawn several times, each shifted by a fraction of a pixel, and averaged
+  private aaMean: THREE.WebGLRenderTarget | null = null;
+  private aaFrame: THREE.WebGLRenderTarget | null = null;
+  private aaDone = 0;
+  private aaJob: { w: number; h: number; ss: number; total: number } | null = null;
   private needsRefine = false;
   /** Canvas pixel budgets (device pixels) for interactive frames. */
   quality = { fastPixels: 1.4e6, fullPixels: 4.5e6, maxSupersampledPixels: 9e6 };
@@ -193,7 +198,7 @@ export class MolartRenderer {
       glslVersion: THREE.GLSL3,
       vertexShader: FULLSCREEN_VERT,
       fragmentShader: DOWNSAMPLE_FRAG,
-      uniforms: { tSrc: { value: null }, uSrcTexel: { value: new THREE.Vector2() } },
+      uniforms: { tSrc: { value: null }, uSrcTexel: { value: new THREE.Vector2() }, uAlpha: { value: 1 } },
       depthTest: false,
       depthWrite: false,
     });
@@ -225,7 +230,8 @@ export class MolartRenderer {
     // three.js rebuilds programs and buffers lazily; forget our render targets and draw again.
     canvas.addEventListener('webglcontextrestored', () => {
       this.targetSets.clear();
-      this.gbuf = this.comp = this.fastOut = null;
+      this.gbuf = this.comp = this.fastOut = this.aaMean = this.aaFrame = null;
+      this.aaJob = null;
       this.needsRefine = true;
       this.invalidate();
     });
@@ -250,7 +256,7 @@ export class MolartRenderer {
       } else if (this.needsRefine && !moving) {
         this.needsRefine = false;
         this.renderToCanvas('full');
-      }
+      } else if (!moving) this.refine();
     };
     loop();
   }
@@ -940,6 +946,54 @@ export class MolartRenderer {
     r.setRenderTarget(null);
   }
 
+  /** Frames averaged for one sharp picture: with 2×2 supersampling four shifted frames give 16 samples a pixel. */
+  private static aaFrames(ss: number) { return ss > 1 ? 4 : 8; }
+
+  /**
+   * Draw frame `i` of an anti-aliased picture, shifted by a fraction of a pixel (a fixed Halton sequence, so
+   * the result is reproducible), and fold it into the running mean. `present` receives the mean so far
+   * (null = canvas); pass false to skip that copy.
+   */
+  private accumulate(i: number, w: number, h: number, ss: number, present: THREE.WebGLRenderTarget | null | false, aspectFit?: number) {
+    if (!this.style || !this.layers.length) return;
+    if (!this.aaMean || this.aaMean.width !== w || this.aaMean.height !== h) {
+      this.aaMean?.dispose(); this.aaFrame?.dispose();
+      this.aaMean = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, depthBuffer: false });
+      this.aaFrame = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, depthBuffer: false });
+    }
+    const halton = (n: number, b: number) => { let f = 1, r = 0; while (n > 0) { f /= b; r += f * (n % b); n = Math.floor(n / b); } return r; };
+    // the first frame is unshifted; the rest fill in the pixel (or the sub-pixel cell of a supersampled frame)
+    const jx = i === 0 ? 0 : (halton(i, 2) - 0.5) / ss, jy = i === 0 ? 0 : (halton(i, 3) - 0.5) / ss;
+    const cam = this.camera, r = this.renderer, d = this.downMat;
+    cam.setViewOffset(w, h, jx, jy, w, h);
+    this.renderPipeline(w, h, ss, this.aaFrame, aspectFit);
+    cam.clearViewOffset();
+    d.uniforms.tSrc.value = this.aaFrame!.texture;
+    d.uniforms.uSrcTexel.value.set(0, 0);
+    d.uniforms.uAlpha.value = 1 / (i + 1);
+    d.transparent = true;
+    this.quad.material = d;
+    r.setRenderTarget(this.aaMean);
+    r.render(this.quadScene, this.quadCam);
+    d.transparent = false;
+    d.uniforms.uAlpha.value = 1;
+    if (present !== false) {
+      d.uniforms.tSrc.value = this.aaMean.texture;
+      r.setRenderTarget(present);
+      r.render(this.quadScene, this.quadCam);
+    }
+    r.setRenderTarget(null);
+  }
+
+  /** While the view rests, add one more shifted frame to the picture on the canvas. Returns true while there is more to do. */
+  refine(): boolean {
+    const j = this.aaJob;
+    if (!j || this.aaDone >= j.total) return false;
+    this.accumulate(this.aaDone++, j.w, j.h, j.ss, null);
+    this.onAfterRender?.();
+    return this.aaDone < j.total;
+  }
+
   renderToCanvas(mode: 'fast' | 'full' = 'full') {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const cw = Math.max(1, this.canvas.clientWidth), ch = Math.max(1, this.canvas.clientHeight);
@@ -956,6 +1010,7 @@ export class MolartRenderer {
       this.controls.handleResize();
     }
     const fs = Math.min(1, Math.sqrt(this.quality.fastPixels / (w * h)));
+    if (mode === 'fast') this.aaJob = null;
     if (mode === 'fast' && fs < 0.95) {
       const fw = Math.max(1, Math.round(w * fs)), fh = Math.max(1, Math.round(h * fs));
       if (!this.fastOut || this.fastOut.width !== fw || this.fastOut.height !== fh) {
@@ -973,9 +1028,16 @@ export class MolartRenderer {
       this.renderer.render(this.quadScene, this.quadCam);
     } else {
       const ss = mode === 'fast' || w * h * 4 > this.quality.maxSupersampledPixels ? 1 : 2;
-      this.compositeMat.uniforms.uFast.value = mode === 'fast' ? 1 : 0;
-      this.renderPipeline(w, h, ss, null);
-      this.compositeMat.uniforms.uFast.value = 0;
+      if (mode === 'fast') {
+        this.compositeMat.uniforms.uFast.value = 1;
+        this.renderPipeline(w, h, ss, null);
+        this.compositeMat.uniforms.uFast.value = 0;
+      } else {
+        // the first frame appears at once; the loop adds the shifted ones while the view rests
+        this.aaJob = { w, h, ss, total: MolartRenderer.aaFrames(ss) };
+        this.accumulate(0, w, h, ss, null);
+        this.aaDone = 1;
+      }
     }
     this.onAfterRender?.();
   }
@@ -1004,7 +1066,9 @@ export class MolartRenderer {
     const out = new THREE.WebGLRenderTarget(width, height, { type: THREE.UnsignedByteType, depthBuffer: false });
     // an export shows the central square of a wide window (where the default view frames the protein), not its empty sides
     const aspect = Math.min(1, this.canvasAspect());
-    this.renderPipeline(width, height, ss, out, aspect);
+    const frames = MolartRenderer.aaFrames(ss);
+    for (let i = 0; i < frames; i++) this.accumulate(i, width, height, ss, i === frames - 1 ? out : false, aspect);
+    this.aaJob = null;
     const buf = new Uint8Array(width * height * 4);
     this.renderer.readRenderTargetPixels(out, 0, 0, width, height, buf);
     out.dispose();
@@ -1016,7 +1080,7 @@ export class MolartRenderer {
     }
     for (let i = 3; i < px.length; i += 4) px[i] = 255;
     // release large supersampled buffers after big exports
-    if (width * height > 4.2e6) this.releaseTargets(width * ss, height * ss);
+    if (width * height > 4.2e6) { this.releaseTargets(width * ss, height * ss); this.aaMean?.dispose(); this.aaFrame?.dispose(); this.aaMean = this.aaFrame = null; }
     this.invalidate();
     return px;
   }
