@@ -371,6 +371,31 @@ try {
     check('sun: casts shadows, can be turned and coloured, and off restores the picture', l.turned !== l.a && l.tinted !== l.a && l.tinted !== l.turned && l.back === l.a);
     check('sun: a second light changes the picture, and a light can stand anywhere on the pad', l.two !== l.one && l.front !== l.one && l.one !== l.a);
     check('light pad: one dot per light, + adds one and − removes it', l.dots === 1 && l.added === 2 && l.removed === 1);
+    // transparent export: no paper in the corners, solid inside, and laid over white it is the opaque picture
+    const tr = await page.evaluate(async () => {
+      const m = window.molart, out = {};
+      const px = async (b64) => {
+        const img = new Image(); img.src = 'data:image/png;base64,' + b64; await img.decode();
+        const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+        const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+        return g.getImageData(0, 0, c.width, c.height).data;
+      };
+      for (const st of ['normal', 'schiele', 'glass']) {
+        m.setStyle(st);
+        const a = await px(await m.exportPNGBase64(256, 256)), t = await px(await m.exportPNGBase64(256, 256, { transparent: true }));
+        let worst = 0, solid = 0, clear = 0;
+        for (let i = 0; i < a.length; i += 4) {
+          const al = t[i + 3] / 255;
+          if (t[i + 3] === 255) solid++;
+          if (t[i + 3] === 0) clear++;
+          for (let k = 0; k < 3; k++) worst = Math.max(worst, Math.abs(t[i + k] * al + 255 * (1 - al) - a[i + k]));
+        }
+        out[st] = { corner: t[3], worst: Math.round(worst), solid: solid / (a.length / 4), clear: clear / (a.length / 4), opaqueAlpha: a[3] };
+      }
+      m.setStyle('normal');
+      return out;
+    });
+    check('transparent export: clear paper, solid protein, and over white it matches the opaque export', Object.values(tr).every((v) => v.corner === 0 && v.opaqueAlpha === 255 && v.worst <= 6 && v.solid > 0.05 && v.clear > 0.3), JSON.stringify(tr));
   }
 
   // memory: clicking through every style in both modes must not pile up meshes

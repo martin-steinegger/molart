@@ -128,6 +128,19 @@ export class MolartRenderer {
   private aaMean: THREE.WebGLRenderTarget | null = null;
   private aaFrame: THREE.WebGLRenderTarget | null = null;
   private aaDone = 0;
+  // transparent export: how much paper shows through, gathered from every layer's surface buffer
+  private maskOn = false;
+  private maskSS: THREE.WebGLRenderTarget | null = null;
+  private aaMask: THREE.WebGLRenderTarget | null = null;
+  private maskMat = new THREE.RawShaderMaterial({
+    glslVersion: THREE.GLSL3,
+    vertexShader: FULLSCREEN_VERT,
+    fragmentShader: `precision highp float; in vec2 vUv; uniform sampler2D tSurf; out vec4 outColor;
+void main(){ outColor = vec4(vec3(1.0 - step(1e-4, texture(tSurf, vUv).w)), 1.0); }`,
+    uniforms: { tSurf: { value: null } },
+    depthTest: false, depthWrite: false,
+    blending: THREE.CustomBlending, blendSrc: THREE.DstColorFactor, blendDst: THREE.ZeroFactor,
+  });
   private aaJob: { w: number; h: number; ss: number; total: number } | null = null;
   private needsRefine = false;
   /** Canvas pixel budgets (device pixels) for interactive frames. */
@@ -715,6 +728,15 @@ export class MolartRenderer {
     const gw = w * ss, gh = h * ss;
     const set = this.ensureTargets(gw, gh);
     const cam = this.camera;
+    if (this.maskOn) {
+      if (!this.maskSS || this.maskSS.width !== gw || this.maskSS.height !== gh) {
+        this.maskSS?.dispose();
+        this.maskSS = new THREE.WebGLRenderTarget(gw, gh, { type: THREE.UnsignedByteType, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: false });
+      }
+      this.renderer.setRenderTarget(this.maskSS);
+      this.renderer.setClearColor(0xffffff, 1);
+      this.renderer.clear(true, false, false);
+    }
     const savedFov = cam.fov, savedAspect = cam.aspect;
     cam.aspect = w / h;
     // Keep horizontal coverage when the output is narrower than the interactive view.
@@ -793,6 +815,13 @@ export class MolartRenderer {
       r.setClearColor(0x000000, 0);
       r.clear(true, true, true);
       r.render(this.scene, cam);
+      if (this.maskOn) {
+        // paper stays only where no layer has a surface
+        this.maskMat.uniforms.tSurf.value = this.gbuf!.textures[1];
+        this.quad.material = this.maskMat;
+        r.setRenderTarget(this.maskSS);
+        r.render(this.quadScene, this.quadCam);
+      }
       const trans = style.translucency ?? 0;
       const glass = style.glass;
       const wax = style.wax;
@@ -975,6 +1004,17 @@ export class MolartRenderer {
     this.quad.material = d;
     r.setRenderTarget(this.aaMean);
     r.render(this.quadScene, this.quadCam);
+    if (this.maskOn) {
+      if (!this.aaMask || this.aaMask.width !== w || this.aaMask.height !== h) {
+        this.aaMask?.dispose();
+        this.aaMask = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, depthBuffer: false });
+      }
+      d.uniforms.tSrc.value = this.maskSS!.texture;
+      d.uniforms.uSrcTexel.value.set(ss > 1 ? 1 / (w * ss) : 0, ss > 1 ? 1 / (h * ss) : 0);
+      r.setRenderTarget(this.aaMask);
+      r.render(this.quadScene, this.quadCam);
+      d.uniforms.uSrcTexel.value.set(0, 0);
+    }
     d.transparent = false;
     d.uniforms.uAlpha.value = 1;
     if (present !== false) {
@@ -1058,8 +1098,11 @@ export class MolartRenderer {
     return (performance.now() - t0) / frames;
   }
 
-  /** Render offscreen at an exact pixel size and return opaque RGBA pixels (top row first). */
-  renderPixels(width: number, height: number): Uint8ClampedArray {
+  /**
+   * Render offscreen at an exact pixel size and return RGBA pixels (top row first): opaque on white paper, or,
+   * with `transparent`, with the paper removed. Laid back over white, the transparent picture is the opaque one.
+   */
+  renderPixels(width: number, height: number, transparent = false): Uint8ClampedArray {
     const max = this.renderer.capabilities.maxTextureSize;
     if (width > max || height > max) throw new Error(`Requested ${width}×${height} exceeds GPU texture limit ${max}.`);
     const ss = width * 2 <= max && height * 2 <= max && width * height <= 4.2e6 ? 2 : 1;
@@ -1067,30 +1110,50 @@ export class MolartRenderer {
     // an export shows the central square of a wide window (where the default view frames the protein), not its empty sides
     const aspect = Math.min(1, this.canvasAspect());
     const frames = MolartRenderer.aaFrames(ss);
-    for (let i = 0; i < frames; i++) this.accumulate(i, width, height, ss, i === frames - 1 ? out : false, aspect);
+    this.maskOn = transparent;
+    try {
+      for (let i = 0; i < frames; i++) this.accumulate(i, width, height, ss, i === frames - 1 ? out : false, aspect);
+    } finally { this.maskOn = false; }
     this.aaJob = null;
     const buf = new Uint8Array(width * height * 4);
     this.renderer.readRenderTargetPixels(out, 0, 0, width, height, buf);
+    if (transparent) {
+      // Alpha: 1 where a surface covers the pixel; elsewhere as much as the mark darkens the paper (lines, washes
+      // and soft edges outside the shape). Colour is what, laid over white at that alpha, gives the opaque picture.
+      const paper = new Uint8Array(width * height * 4);
+      this.downMat.uniforms.tSrc.value = this.aaMask!.texture;
+      this.quad.material = this.downMat;
+      this.renderer.setRenderTarget(out);
+      this.renderer.render(this.quadScene, this.quadCam);
+      this.renderer.setRenderTarget(null);
+      this.renderer.readRenderTargetPixels(out, 0, 0, width, height, paper);
+      for (let i = 0; i < buf.length; i += 4) {
+        const a = Math.max(255 - paper[i], 255 - Math.min(buf[i], buf[i + 1], buf[i + 2]));
+        if (a > 0 && a < 255) for (let k = 0; k < 3; k++) buf[i + k] = Math.max(0, Math.min(255, Math.round(((buf[i + k] - (255 - a)) * 255) / a)));
+        buf[i + 3] = a;
+      }
+      this.aaMask!.dispose(); this.maskSS?.dispose(); this.aaMask = this.maskSS = null;
+    }
     out.dispose();
-    // flip vertically and force opaque alpha
+    // flip vertically; the white-paper picture is forced opaque
     const px = new Uint8ClampedArray(width * height * 4);
     for (let y = 0; y < height; y++) {
       const src = (height - 1 - y) * width * 4;
       px.set(buf.subarray(src, src + width * 4), y * width * 4);
     }
-    for (let i = 3; i < px.length; i += 4) px[i] = 255;
+    if (!transparent) for (let i = 3; i < px.length; i += 4) px[i] = 255;
     // release large supersampled buffers after big exports
     if (width * height > 4.2e6) { this.releaseTargets(width * ss, height * ss); this.aaMean?.dispose(); this.aaFrame?.dispose(); this.aaMean = this.aaFrame = null; }
     this.invalidate();
     return px;
   }
 
-  async exportPNG(width: number, height: number): Promise<Blob> {
-    const px = this.renderPixels(width, height);
+  async exportPNG(width: number, height: number, transparent = false): Promise<Blob> {
+    const px = this.renderPixels(width, height, transparent);
     const c = document.createElement('canvas');
     c.width = width;
     c.height = height;
-    const ctx = c.getContext('2d', { alpha: false })!;
+    const ctx = c.getContext('2d', { alpha: transparent })!;
     ctx.putImageData(new ImageData(px as unknown as Uint8ClampedArray<ArrayBuffer>, width, height), 0, 0);
     return await new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('PNG encoding failed'))), 'image/png'));
   }

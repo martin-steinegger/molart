@@ -69,10 +69,11 @@ const api = {
       fingerprint: coordinateFingerprint(s),
     };
   },
-  exportPNGBase64: async (w: number, h: number) => blobToBase64(await app.r.exportPNG(w, h)),
+  /** PNG at an exact size: on opaque white paper, or with { transparent: true } on no background at all. */
+  exportPNGBase64: async (w: number, h: number, opts?: { transparent?: boolean }) => blobToBase64(await app.r.exportPNG(w, h, !!opts?.transparent)),
   /** Returns raw RGBA statistics for verification (corner pixels, alpha range). */
-  exportStats: (w: number, h: number) => {
-    const px = app.r.renderPixels(w, h);
+  exportStats: (w: number, h: number, transparent = false) => {
+    const px = app.r.renderPixels(w, h, transparent);
     const at = (x: number, y: number) => Array.from(px.subarray((y * w + x) * 4, (y * w + x) * 4 + 4));
     let minA = 255, nonWhite = 0;
     for (let i = 0; i < px.length; i += 4) {

@@ -15,6 +15,7 @@ usage:
   molart render  <file.pdb|.cif> --style <id> [--width 2400] [--height 2400] [--seed 42]
                  [--deform 0..1] [--colors '#aaaaaa,#bbbbbb'] [--camera cam.json] [--chains A,B]
                  [--chain-styles A=glass,B=klimt] [--no-faces] [--ascii 0..1] [--art]
+                 [--transparent]
                  [--output out.png]
   molart gallery <file.pdb|.cif> [--styles normal,schiele,picasso,klimt,vangogh,dali]
                  [--size 1024] [--seed 42] [--deform 0..1] [--camera cam.json] [--chains A]
@@ -22,7 +23,8 @@ usage:
   molart styles
 
 options:
-  --background must be #ffffff (exports are always opaque white); other values are rejected.
+  --background must be #ffffff (exports are opaque white unless --transparent is given); other values are rejected.
+  --transparent  write the PNG without the white paper (alpha channel); laid over white it is the normal picture.
   --camera     JSON {position,target,up,fov} as produced by "Copy camera" in the app.
   --chains     frame the camera on these chains (all chains are still drawn).
   --chain-styles  give chains their own style (chain id = style id); other chains use --style.
@@ -130,7 +132,7 @@ async function main() {
         await page.evaluate((m) => window.molart.setChainStyles(m), cs);
       }
       if (args.colors) await page.evaluate((c) => window.molart.setColors(c[0], c[1]), parseColors(args.colors));
-      const b64 = await page.evaluate(([W, H]) => window.molart.exportPNGBase64(W, H), [w, h]);
+      const b64 = await page.evaluate(([W, H, T]) => window.molart.exportPNGBase64(W, H, { transparent: T }), [w, h, !!args.transparent]);
       mkdirSync(dirname(resolve(out)), { recursive: true });
       writeFileSync(out, Buffer.from(b64, 'base64'));
       const cam = await page.evaluate(() => window.molart.getCamera());
